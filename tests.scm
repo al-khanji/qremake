@@ -1,0 +1,12 @@
+(null? '())
+(null? '(1))
+(list-append (list 1 2 3) (list 4 5))
+(list-invert '())
+(list-invert '(1))
+(list-invert '(1 2))
+(list-invert '(1 2 3))
+(define long-list '(1 2 3 4 5 6 7 8 "\"hello \"world" "more (text) 'here()() :)"))
+(list-invert long-list)
+(map null? '(1 2 () 3 4))
+(define (is-null? x) (if (null? x) (list 'yes-null x) (list 'not-null x)))
+(map is-null? '(1 2 () 3 4))"

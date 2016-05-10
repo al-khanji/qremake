@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/">
+        <file>system.scm</file>
+        <file>tests.scm</file>
+    </qresource>
+</RCC>
