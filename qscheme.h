@@ -11,80 +11,28 @@ class QSchemeEnvironment;
 
 typedef QVector<QSchemeValue> QSchemeValueList;
 
-class QRefcountedData
-{
-public:
-    inline QRefcountedData() : ref(0) {}
-    inline QRefcountedData(const QRefcountedData &) : ref(0) {}
-    inline QRefcountedData &operator=(const QRefcountedData &) { return *this; }
-
-    mutable QAtomicInt ref;
-};
-
-template <class Data>
-class QRefcountingPointer
-{
-public:
-    typedef Data type;
-    typedef Data* pointer;
-
-    inline QRefcountingPointer() : d(nullptr) {}
-    inline QRefcountingPointer(const QRefcountingPointer &other) : d(other.d) { ref(data()); }
-    inline QRefcountingPointer(pointer p) : d(p) { ref(p); }
-    inline ~QRefcountingPointer() { reset(); }
-
-    inline QRefcountingPointer &operator=(const QRefcountingPointer &other) {
-        reset(other.data());
-        return *this;
-    }
-
-    inline void reset(pointer p = nullptr) {
-        if (d != p) {
-            pointer previous = data();
-            ref(p);
-            d = p;
-            deref(previous);
-        }
-    }
-
-    inline type &operator*() const { return *data(); }
-    inline pointer operator->() const { return data(); }
-
-    inline pointer data() const { return reinterpret_cast<pointer>(d); }
-    inline pointer take() const { QRefcountedData *p = nullptr; std::swap(p, d); return reinterpret_cast<pointer>(p); }
-
-    inline explicit operator bool() const { return isNull() ? nullptr : d; }
-    inline bool isNull() const { return !d; }
-
-private:
-    inline static void ref(pointer p) { if (p) p->ref.ref(); }
-    inline static void deref(pointer p) { if (p && !p->ref.deref()) delete p; }
-
-    QRefcountedData *d = nullptr;
-};
-
 class Q_SCHEME_EXPORT QSchemeSymbol {
 public:
     inline QSchemeSymbol() {}
-    inline explicit QSchemeSymbol(const QLatin1String &string) : m_utf8_name(string.data()) {}
-    inline explicit QSchemeSymbol(const QString &string) : m_utf8_name(string.toUtf8()) {}
-    inline explicit QSchemeSymbol(const QByteArray &name) : m_utf8_name(name) {}
+    inline explicit QSchemeSymbol(const QLatin1String &string) : m_symname(string) {}
+    inline explicit QSchemeSymbol(const QString &string) : m_symname(string) {}
+    //inline explicit QSchemeSymbol(const QByteArray &name) : m_symname(name) {}
     inline ~QSchemeSymbol() {}
 
     inline QSchemeSymbol &operator=(const QSchemeSymbol &other) {
-        m_utf8_name = other.m_utf8_name;
+        m_symname = other.m_symname;
         return *this;
     }
 
     inline bool operator==(const QSchemeSymbol &other) const {
-        return m_utf8_name == other.toUtf8();
+        return m_symname == other.m_symname;
     }
 
-    inline QByteArray toUtf8() const { return m_utf8_name; }
-    inline QString toString() const { return QString::fromUtf8(m_utf8_name); }
+    inline QByteArray toUtf8() const { return m_symname.toUtf8(); }
+    inline QString toString() const { return m_symname; }
 
 private:
-    QByteArray m_utf8_name;
+    QString m_symname;
 };
 
 inline uint qHash(const QSchemeSymbol &sym, uint seed) {
@@ -92,7 +40,7 @@ inline uint qHash(const QSchemeSymbol &sym, uint seed) {
 }
 
 inline QSchemeSymbol QSchemeSymbolLiteral(const char *symname) {
-    return QSchemeSymbol(QByteArray(symname));
+    return QSchemeSymbol(QLatin1String(symname));
 }
 
 class Q_SCHEME_EXPORT QSchemeException : public std::exception {
@@ -107,7 +55,7 @@ public:
     const char *what() const noexcept Q_DECL_OVERRIDE { return m_msg.data(); }
 
 private:
-    QByteArray m_msg;
+    QLatin1String m_msg;
 };
 
 class Q_SCHEME_EXPORT QSchemeUndefinedSymbolException : public QSchemeException {
@@ -123,6 +71,8 @@ private:
     QSchemeSymbol m_symbol;
 };
 
+class QSchemeLambdaProcedure;
+
 class Q_SCHEME_EXPORT QSchemeValue
 {
 public:    
@@ -130,13 +80,16 @@ public:
     QSchemeValue(const QSchemeValue &);
     ~QSchemeValue();
 
-    typedef QSchemeValue (*foreign_proc_t)(QSchemeEnvironment *env, const QSchemeValue &arg);
+    typedef QSchemeValue (*foreign_syntax_t)(QSchemeEnvironment &env, const QSchemeValue &arg);
+    typedef QSchemeValue (*foreign_proc_t)(const QSchemeValue &arg);
 
     QSchemeValue(const QSchemeEnvironment &env);
     QSchemeValue(const QSchemeSymbol &symbol);
     QSchemeValue(const QString &string);
     QSchemeValue(const QSchemeValueList &list); // -> Cons
+    QSchemeValue(foreign_syntax_t syntax);
     QSchemeValue(foreign_proc_t proc);
+    QSchemeValue(const QSchemeLambdaProcedure &proc_info);
 
     explicit QSchemeValue(int i);
     explicit QSchemeValue(double d);
@@ -150,7 +103,9 @@ public:
         Cons,
         String,
         Number,
-        ForeignProcedure
+        ForeignSyntax,
+        ForeignProcedure,
+        LambdaProcedure
     };
 
     Type type() const;
@@ -160,7 +115,9 @@ public:
     QSchemeValueList toList() const;
     QString toString() const;
     QVariant toNumber() const;
+    foreign_syntax_t toForeignSyntax() const;
     foreign_proc_t toForeignProcedure() const;
+    QSchemeLambdaProcedure toLambdaProcedure() const;
 
     QString toPrintableString() const;
 
@@ -175,12 +132,18 @@ Q_SCHEME_EXPORT QSchemeValue analyze_define(const QSchemeValue &val);
 Q_SCHEME_EXPORT bool is_false(const QSchemeValue &val);
 inline bool is_true(const QSchemeValue &val) { return !is_false(val); }
 
+Q_SCHEME_EXPORT bool is_null(const QSchemeValue &val);
 Q_SCHEME_EXPORT bool is_symbol(const QSchemeValue &val);
+Q_SCHEME_EXPORT bool is_number(const QSchemeValue &val);
+Q_SCHEME_EXPORT bool is_string(const QSchemeValue &val);
 Q_SCHEME_EXPORT bool is_list(const QSchemeValue &val);
+Q_SCHEME_EXPORT bool is_native_procedure(const QSchemeValue &val);
+Q_SCHEME_EXPORT bool is_foreign_procedure(const QSchemeValue &val);
+Q_SCHEME_EXPORT bool is_macro(const QSchemeValue &val);
 
 Q_SCHEME_EXPORT QSchemeValue car(const QSchemeValue &val);
 Q_SCHEME_EXPORT QSchemeValue cdr(const QSchemeValue &val);
-Q_SCHEME_EXPORT QSchemeValue cons(const QSchemeValue &val);
+Q_SCHEME_EXPORT QSchemeValue cons(const QSchemeValue &a, const QSchemeValue &b);
 
 template <class... Ts>
 inline QSchemeValue list(const Ts& ...values) {
@@ -205,6 +168,10 @@ inline QSchemeValue cddr(const QSchemeValue &val) {
 
 inline QSchemeValue cadar(const QSchemeValue &val) {
     return car(cdr(car(val)));
+}
+
+inline QSchemeValue caadr(const QSchemeValue &val) {
+    return car(car(cdr(val)));
 }
 
 inline QSchemeValue caddr(const QSchemeValue &val) {
@@ -234,6 +201,7 @@ class Q_SCHEME_EXPORT QSchemeEnvironment
 {
 public:
     QSchemeEnvironment();
+    QSchemeEnvironment(QSchemeEnvironmentPrivate *dd);
     QSchemeEnvironment(const QSchemeEnvironment &);
     virtual ~QSchemeEnvironment();
 
@@ -241,7 +209,10 @@ public:
 
     bool load(const QString &localPath);
 
-    virtual QSchemeEnvironment findSymbol(const QSchemeValue &symbol) const;
+    enum class Message { InputExpression, ResultOfExpression };
+    void sendToRepl(Message m, const QSchemeValue &val);
+
+    virtual QSchemeEnvironmentPrivate *findSymbol(const QSchemeValue &symbol) const;
 
     virtual QSchemeValue set(const QSchemeValue &symbol, const QSchemeValue &value);
     virtual QSchemeValue get(const QSchemeValue &symbol) const;
@@ -253,14 +224,26 @@ public:
 
     virtual QSchemeValue eval(const QSchemeValue &exp);
 
+    virtual QSchemeValue apply(const QSchemeValue &procedure, const QSchemeValue &arguments);
+    virtual QSchemeValueList evalArgumentList(const QSchemeValue &args);
+
     virtual QSchemeEnvironment makeInner();
 
 protected:
-    QSchemeEnvironment(QSchemeEnvironmentPrivate *dd);
 
 private:
-    QRefcountingPointer<QSchemeEnvironmentPrivate> d_ptr;
+    QSharedPointer<QSchemeEnvironmentPrivate> d_ptr;
     Q_DECLARE_PRIVATE(QSchemeEnvironment)
+};
+
+class Q_SCHEME_EXPORT QSchemeLambdaProcedure
+{
+public:
+    QSchemeValueList argnames;
+    QSchemeValue body;
+    QSchemeEnvironment environment;
+
+    QSchemeValue apply(const QSchemeValue &arguments);
 };
 
 #ifndef QT_NO_DATASTREAM
@@ -272,11 +255,13 @@ Q_SCHEME_EXPORT QDataStream &operator>>(QDataStream &, QSchemeValue &);
 Q_SCHEME_EXPORT QDebug operator<<(QDebug, const QSchemeValue &);
 #endif
 
-Q_DECLARE_METATYPE(QSchemeSymbol)
-Q_DECLARE_METATYPE(QSchemeValue)
 Q_DECLARE_METATYPE(QSchemeEnvironment)
+Q_DECLARE_METATYPE(QSchemeSymbol)
 Q_DECLARE_METATYPE(QSchemeValueList)
 Q_DECLARE_METATYPE(QSchemeValue::foreign_proc_t)
+Q_DECLARE_METATYPE(QSchemeValue::foreign_syntax_t)
+Q_DECLARE_METATYPE(QSchemeLambdaProcedure)
+Q_DECLARE_METATYPE(QSchemeValue)
 
 QT_END_NAMESPACE
 

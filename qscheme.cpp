@@ -28,15 +28,34 @@ bool is_symbol(const QSchemeValue &val)
     return val.type() == QSchemeValue::Type::Symbol;
 }
 
+bool is_number(const QSchemeValue &val)
+{
+    return val.type() == QSchemeValue::Type::Number;
+}
+
+bool is_string(const QSchemeValue &val)
+{
+    return val.type() == QSchemeValue::Type::String;
+}
+
 bool is_list(const QSchemeValue &val)
 {
     return val.type() == QSchemeValue::Type::Cons;
 }
 
+bool is_native_procedure(const QSchemeValue &val)
+{
+    return val.type() == QSchemeValue::Type::LambdaProcedure;
+}
+
+bool is_foreign_procedure(const QSchemeValue &val)
+{
+    return val.type() == QSchemeValue::Type::ForeignProcedure;
+}
 
 QSchemeValue car(const QSchemeValue &val)
 {
-    if (val.type() == QSchemeValue::Type::Cons && val.toList().size() > 0)
+    if (is_list(val) && val.toList().size() > 0)
         return val.toList().first();
     else
         throw QSchemeException("car: invalid argument type");
@@ -44,109 +63,39 @@ QSchemeValue car(const QSchemeValue &val)
 
 QSchemeValue cdr(const QSchemeValue &val)
 {
-    if (val.type() != QSchemeValue::Type::Cons)
+    if (is_list(val) && val.toList().size() > 0)
+        return val.toList().mid(1);
+    else
         throw QSchemeException("cdr: invalid argument type");
-
-    const QSchemeValueList values = val.toList();
-    if (values.isEmpty())
-        throw QSchemeException("cdr: unexpected empty list");
-
-    return values.mid(1);
 }
 
-QSchemeValue cons(const QSchemeValue &val)
+QSchemeValue cons(const QSchemeValue &a, const QSchemeValue &b)
 {
-    QSchemeValue head = car(val);
-    QSchemeValue tail = cadr(val);
+    if (is_null(b))
+        return list(a);
 
-    if (is_list(tail)) {
-        QSchemeValueList result = tail.toList();
-        result.prepend(head);
+    if (is_list(b)) {
+        QSchemeValueList result = b.toList();
+        result.prepend(a);
         return result;
     }
 
-    return list(head, tail);
+    return list(a, b);
+}
+
+bool is_null(const QSchemeValue &val)
+{
+    return is_list(val) && val.toList().isEmpty();
 }
 
 } // namespace QtSchemeFunctions
 
-static const quintptr tag_box       = 0b11;
-static const quintptr tag_mask      = 0b11;
-
-static inline quintptr tag(quintptr p) { return p & tag_mask; }
-static inline quintptr is_box(quintptr p) { return tag(p) == tag_box; }
-
-namespace {
-class Box : public QRefcountedData {
-public:
-    Box() = default;
-    Box(QVariant &&v) : variant(v) {}
-
-    QVariant variant;
-
-    static inline quintptr create(QVariant &&v) {
-        Box *box = new Box(std::forward<QVariant>(v));
-        box->ref.ref();
-        return reinterpret_cast<quintptr>(box) | tag_box;
-    }
-
-    static inline Box *get(quintptr p) {
-        return is_box(p) ? reinterpret_cast<Box *>(p & ~tag_box)
-                         : nullptr;
-    }
-
-    static inline void attach(quintptr p) {
-        if (Box *box = get(p))
-            box->ref.ref();
-    }
-
-    static inline void detach(quintptr p) {
-        if (Box *box = get(p))
-            if (!box->ref.deref())
-                delete box;
-    }
-
-    static inline QSchemeValue::Type type(quintptr p) {
-        switch (get(p)->variant.type()) {
-        case QVariant::String:
-            return QSchemeValue::Type::String;
-
-        case QVariant::Int:
-        case QVariant::UInt:
-        case QVariant::LongLong:
-        case QVariant::ULongLong:
-        case QVariant::Double:
-            return QSchemeValue::Type::Number;
-
-        case QVariant::UserType:
-            break;
-
-        default:
-            Q_UNREACHABLE();
-        }
-
-        const int id = get(p)->variant.userType();
-
-        if (id == qMetaTypeId<QSchemeValueList>())
-            return QSchemeValue::Type::Cons;
-        else if (id == qMetaTypeId<QSchemeSymbol>())
-            return QSchemeValue::Type::Symbol;
-        else if (id == qMetaTypeId<QSchemeValue::foreign_proc_t>())
-            return QSchemeValue::Type::ForeignProcedure;
-        else if (id == qMetaTypeId<QSchemeEnvironment>())
-            return QSchemeValue::Type::Environment;
-
-        Q_UNREACHABLE();
-    }
-};
-} // namespace
-
 QSchemeValue::QSchemeValue()
-    : d(Box::create(QVariant::fromValue(QSchemeValueList())))
+    : d(QVariant::fromValue(QSchemeValueList()))
 {}
 
 QSchemeValue::QSchemeValue(const QSchemeValue &other)
-    : d(other.d)
+    : d(QVariant(other.d))
 {}
 
 QSchemeValue::~QSchemeValue()
@@ -176,8 +125,16 @@ QSchemeValue::QSchemeValue(const QSchemeValueList &list)
     : d(QVariant::fromValue(list))
 {}
 
+QSchemeValue::QSchemeValue(foreign_syntax_t syntax)
+    : d(QVariant::fromValue(syntax))
+{}
+
 QSchemeValue::QSchemeValue(foreign_proc_t proc)
     : d(QVariant::fromValue(proc))
+{}
+
+QSchemeValue::QSchemeValue(const QSchemeLambdaProcedure &proc_info)
+    : d(QVariant::fromValue(proc_info))
 {}
 
 QSchemeValue &QSchemeValue::operator=(const QSchemeValue &other)
@@ -193,7 +150,9 @@ bool QSchemeValue::operator==(const QSchemeValue &other) const
 
 QSchemeValue::Type QSchemeValue::type() const
 {
-    switch (d.type()) {
+    const int id = d.userType();
+
+    switch (id) {
     case QVariant::String:
         return QSchemeValue::Type::String;
 
@@ -204,14 +163,9 @@ QSchemeValue::Type QSchemeValue::type() const
     case QVariant::Double:
         return QSchemeValue::Type::Number;
 
-    case QVariant::UserType:
-        break;
-
     default:
-        Q_UNREACHABLE();
+        break;
     }
-
-    const int id = d.userType();
 
     if (id == qMetaTypeId<QSchemeValueList>())
         return QSchemeValue::Type::Cons;
@@ -221,6 +175,10 @@ QSchemeValue::Type QSchemeValue::type() const
         return QSchemeValue::Type::ForeignProcedure;
     else if (id == qMetaTypeId<QSchemeEnvironment>())
         return QSchemeValue::Type::Environment;
+    else if (id == qMetaTypeId<QSchemeLambdaProcedure>())
+        return QSchemeValue::Type::LambdaProcedure;
+    else if (id == qMetaTypeId<QSchemeValue::foreign_syntax_t>())
+        return QSchemeValue::Type::ForeignSyntax;
 
     Q_UNREACHABLE();
 }
@@ -257,10 +215,22 @@ QVariant QSchemeValue::toNumber() const
     return d;
 }
 
+QSchemeValue::foreign_syntax_t QSchemeValue::toForeignSyntax() const
+{
+    CHECK_TYPE(Type::ForeignSyntax);
+    return d.value<foreign_syntax_t>();
+}
+
 QSchemeValue::foreign_proc_t QSchemeValue::toForeignProcedure() const
 {
     CHECK_TYPE(Type::ForeignProcedure);
     return d.value<foreign_proc_t>();
+}
+
+QSchemeLambdaProcedure QSchemeValue::toLambdaProcedure() const
+{
+    CHECK_TYPE(Type::LambdaProcedure);
+    return d.value<QSchemeLambdaProcedure>();
 }
 
 #undef CHECK_TYPE
@@ -270,6 +240,14 @@ QString QSchemeValue::toPrintableString() const
     QString string;
 
     switch (type()) {
+    case QSchemeValue::Type::ForeignSyntax:
+        string = QStringLiteral("#<ForeignSyntax>");
+        break;
+
+    case QSchemeValue::Type::LambdaProcedure:
+        string = QStringLiteral("#<Lambda procedure>");
+        break;
+
     case QSchemeValue::Type::Symbol:
         string = toSymbol().toString();
         break;
@@ -313,118 +291,147 @@ QString QSchemeValue::toPrintableString() const
     return string;
 }
 
-class QSchemeEnvironmentPrivate : public QRefcountedData
+class QSchemeEnvironmentPrivate : public QEnableSharedFromThis<QSchemeEnvironmentPrivate>
 {
 public:
-    QRefcountingPointer<QSchemeEnvironmentPrivate> outer;
+    QSharedPointer<QSchemeEnvironmentPrivate> outer;
     QHash<QSchemeSymbol, QSchemeValue> symtab;
 };
 
-enum Builtin_Op {
-    Builtin_Define,
-    Builtin_If,
-    Builtin_Eval,
-    Builtin_Quote,
-    Builtin_Cons,
-    Builtin_Car,
-    Builtin_Cdr,
-    Builtin_Lambda,
-    Builtin_List,
-    Builtin_Eq
-};
+using namespace QtSchemeFunctions;
 
-static const QHash<QByteArray, Builtin_Op> builtin_symbol_names = {
-    { "define", Builtin_Define },
-    { "if", Builtin_If },
-    { "eval", Builtin_Eval },
-    { "quote", Builtin_Quote },
-    { "cons", Builtin_Cons },
-    { "car", Builtin_Car },
-    { "cdr", Builtin_Cdr },
-    { "lambda", Builtin_Lambda },
-    { "list", Builtin_List},
-    { "eq?", Builtin_Eq }
-};
-
-static QSchemeValue dispatch_builtin(QSchemeEnvironment *env, const QSchemeValue &all_args) {
-    using namespace QtSchemeFunctions;
-
-    const Builtin_Op op = builtin_symbol_names[car(all_args).toSymbol().toUtf8()];
-    const QSchemeValue op_args = cdr(all_args);
-
-    switch (op) {
-    case Builtin_Eq:
-    {
-        const QSchemeValue a = env->eval(car(op_args));
-        const QSchemeValue b = env->eval(cadr(op_args));
-
-        return a == b ? QSchemeSymbolLiteral("#t")
-                      : QSchemeSymbolLiteral("#f");
-    }
-        break;
-
-    case Builtin_List:
-    {
-        QSchemeValueList result;
-        for (auto arg : op_args.toList())
-            result.push_back(env->eval(arg));
-        return result;
-    }
-        break;
-
-    case Builtin_Define:
-    {
-        QSchemeValue simplified = analyze_define(op_args);
-        return env->set(car(simplified), env->eval(cadr(simplified)));
-    }
-        break;
-
-    case Builtin_If:
-    {
-        const QSchemeValue predicate = env->eval(car(op_args));
-        const QSchemeValue true_branch = cadr(op_args);
-        const QSchemeValue false_branch = caddr(op_args);
-
-        return is_true(env->eval(predicate)) ? env->eval(true_branch)
-                                             : env->eval(false_branch);
-    }
-        break;
-
-    case Builtin_Eval:
-        return env->eval(car(op_args));
-        break;
-
-    case Builtin_Quote:
-        return car(op_args);
-        break;
-
-    case Builtin_Cons:
-        return cons(list(env->eval(car(op_args)), env->eval(cadr(op_args))));
-        break;
-
-    case Builtin_Car:
-        return car(env->eval(car(op_args)));
-        break;
-
-    case Builtin_Cdr:
-        return cdr(env->eval(car(op_args)));
-        break;
-
-    case Builtin_Lambda:
-        return list(QSchemeSymbolLiteral("procedure"), car(op_args), cadr(op_args), *env);
-        break;
-    }
-
-    Q_UNREACHABLE();
+static QSchemeValue make_bool(bool b)
+{
+    return b ? QSchemeSymbolLiteral("#t") : QSchemeSymbolLiteral("#f");
 }
+
+static QSchemeValue builtin_define(QSchemeEnvironment &env, const QSchemeValue &arguments)
+{
+    QSchemeValue simplified = analyze_define(arguments);
+    return env.set(car(simplified), env.eval(cadr(simplified)));
+}
+
+static QSchemeValue builtin_if(QSchemeEnvironment &env, const QSchemeValue &arguments)
+{
+    const QSchemeValue predicate = env.eval(car(arguments));
+    const QSchemeValue true_branch = cadr(arguments);
+    const QSchemeValue false_branch = caddr(arguments);
+
+    return is_true(env.eval(predicate)) ? env.eval(true_branch)
+                                        : env.eval(false_branch);
+}
+
+static QSchemeValue builtin_eval(QSchemeEnvironment &env, const QSchemeValue &arguments)
+{
+    return env.eval(arguments);
+}
+
+static QSchemeValue builtin_quote(QSchemeEnvironment &, const QSchemeValue &arguments)
+{
+    return car(arguments);
+}
+
+static QSchemeValue builtin_cons(const QSchemeValue &arguments)
+{
+    return cons(car(arguments), cadr(arguments));
+}
+
+static QSchemeValue builtin_car(const QSchemeValue &arguments)
+{
+    return car(car(arguments));
+}
+
+static QSchemeValue builtin_cdr(const QSchemeValue &arguments)
+{
+    return cdr(car(arguments));
+}
+
+static QSchemeValue builtin_lambda(QSchemeEnvironment &env, const QSchemeValue &arguments)
+{
+    QSchemeLambdaProcedure proc = { car(arguments).toList(), cadr(arguments), env };
+    return proc;
+}
+
+static QSchemeValue builtin_list(const QSchemeValue &arguments)
+{
+    return arguments;
+}
+
+static QSchemeValue builtin_eqp(const QSchemeValue &arguments)
+{
+    return make_bool(car(arguments) == cadr(arguments));
+}
+
+static QSchemeValue builtin_listp(const QSchemeValue &arguments)
+{
+    return make_bool(is_list(car(arguments)));
+}
+
+static QSchemeValue builtin_stringp(const QSchemeValue &arguments)
+{
+    return make_bool(is_string(car(arguments)));
+}
+
+static QSchemeValue builtin_numberp(const QSchemeValue &arguments)
+{
+    return make_bool(is_number(car(arguments)));
+}
+
+static QSchemeValue builtin_symbolp(const QSchemeValue &arguments)
+{
+    return make_bool(is_symbol(car(arguments)));
+}
+
+static QSchemeValue builtin_callablep(const QSchemeValue &arguments)
+{
+    const QSchemeValue proc = car(arguments);
+    return make_bool(is_foreign_procedure(proc) || is_native_procedure(proc));
+}
+
+static QSchemeValue builtin_apply(QSchemeEnvironment &env, const QSchemeValue &arguments)
+{
+    const QSchemeValue params = env.evalArgumentList(arguments);
+    return env.apply(car(params), cadr(params));
+}
+
+static const struct {
+    const char *name;
+    QSchemeValue::foreign_syntax_t proc;
+} builtin_syntax[] = {
+    { "define", builtin_define },
+    { "if", builtin_if },
+    { "eval", builtin_eval },
+    { "lambda", builtin_lambda },
+    { "apply", builtin_apply },
+    { "quote", builtin_quote }
+};
+
+static const struct {
+    const char *name;
+    QSchemeValue::foreign_proc_t proc;
+} builtin_procedures[] = {
+    { "cons", builtin_cons },
+    { "car", builtin_car },
+    { "cdr", builtin_cdr },
+    { "list", builtin_list},
+    { "eq?", builtin_eqp },
+    { "list?", builtin_listp },
+    { "string?", builtin_stringp },
+    { "number?", builtin_numberp },
+    { "symbol?", builtin_symbolp },
+    { "callable?", builtin_callablep },
+};
 
 QSchemeEnvironment::QSchemeEnvironment()
     : d_ptr(new QSchemeEnvironmentPrivate)
 {
     using namespace QtSchemeFunctions;
 
-    for (const QByteArray &symname : builtin_symbol_names.keys())
-        d_ptr->symtab[QSchemeSymbol(symname)] = QSchemeValue(dispatch_builtin);
+    for (const auto &builtin : builtin_syntax)
+        set(QSchemeSymbol(QLatin1String(builtin.name)), QSchemeValue(builtin.proc));
+
+    for (const auto &builtin : builtin_procedures)
+        set(QSchemeSymbol(QLatin1String(builtin.name)), QSchemeValue(builtin.proc));
 
     set(QSchemeSymbolLiteral("nil"), list());
     set(QSchemeSymbolLiteral("#f"), list());
@@ -449,35 +456,43 @@ bool QSchemeEnvironment::load(const QString &localPath)
     QFile file(localPath);
 
     if (!file.open(QIODevice::ReadOnly)) {
-        qWarning() << "Could not open" << localPath;
+        qWarning() << "Could not open" << localPath << "-" << file.errorString();
         return false;
     }
 
     QTextStream stream(&file);
-    while (!stream.atEnd()) {
-        const QString line = stream.readLine();
-        const QSchemeValue parsed = parse(line);
-        const QSchemeValue result = eval(parsed);
+    QStringList tokens = tokenize(stream.readAll());
 
-        qDebug() << parsed << "\n  =>" << result << "\n";
+    while (!tokens.isEmpty()) {
+        const QSchemeValue exp = readFromTokens(tokens);
+        sendToRepl(Message::InputExpression, exp);
+        sendToRepl(Message::ResultOfExpression, eval(exp));
     }
 
     return true;
 }
 
-QSchemeEnvironment QSchemeEnvironment::findSymbol(const QSchemeValue &symbol) const
+void QSchemeEnvironment::sendToRepl(Message m, const QSchemeValue &val)
+{
+    switch (m) {
+    case Message::InputExpression:
+        qDebug() << val;
+        break;
+    case Message::ResultOfExpression:
+        qDebug() << " =>" << val << "\n";
+        break;
+    }
+}
+
+QSchemeEnvironmentPrivate *QSchemeEnvironment::findSymbol(const QSchemeValue &symbol) const
 {
     const QSchemeSymbol symname = symbol.toSymbol();
-
     const QSchemeEnvironmentPrivate *d = d_func();
 
     while (d && !d->symtab.contains(symname))
         d = d->outer.data();
 
-    if (!d)
-        throw QSchemeUndefinedSymbolException(symname);
-
-    return QSchemeEnvironment(const_cast<QSchemeEnvironmentPrivate *>(d));
+    return const_cast<QSchemeEnvironmentPrivate *>(d);
 }
 
 QSchemeValue QSchemeEnvironment::set(const QSchemeValue &symbol, const QSchemeValue &value)
@@ -488,7 +503,12 @@ QSchemeValue QSchemeEnvironment::set(const QSchemeValue &symbol, const QSchemeVa
 
 QSchemeValue QSchemeEnvironment::get(const QSchemeValue &symbol) const
 {
-    return findSymbol(symbol).d_func()->symtab[symbol.toSymbol()];
+    QSchemeEnvironmentPrivate *envd = findSymbol(symbol);
+
+    if (Q_UNLIKELY(!envd))
+        throw QSchemeUndefinedSymbolException(symbol.toSymbol());
+
+    return envd->symtab[symbol.toSymbol()];
 }
 
 QSchemeValue QSchemeEnvironment::parse(const QString &program) const
@@ -499,32 +519,32 @@ QSchemeValue QSchemeEnvironment::parse(const QString &program) const
 
 namespace Tokens {
 
-static constexpr inline bool isDoubleQuote(QChar c) {
+static inline bool isDoubleQuote(QChar c) {
     return c == QLatin1Char('"');
 }
 
-static constexpr inline bool isBackslash(QChar c) {
+static inline bool isBackslash(QChar c) {
     return c == QLatin1Char('\\');
 }
 
-static constexpr inline bool isSpecialSymbol(QChar c) {
-    return c == QLatin1Char('(') || c == QLatin1Char(')') || c == QLatin1Char('\'');
+static inline bool isSpecialSymbol(QChar c) {
+    return QStringLiteral("()'").contains(c);
 }
 
-static constexpr inline bool isNewLine(QChar c) {
+static inline bool isNewLine(QChar c) {
     return c == QLatin1Char('\n');
 }
 
-static constexpr inline bool isSymbolSeparator(QChar c) {
-    return c.isSpace() || QStringLiteral("()").contains(c);
+static inline bool isSymbolSeparator(QChar c) {
+    return c.isSpace() || QStringLiteral("();").contains(c);
 }
 
-static constexpr inline bool isSemiColon(QChar c) {
+static inline bool isSemiColon(QChar c) {
     return c == QLatin1Char(';');
 }
 
-static constexpr inline bool isDoubleQuoted(const QString &token) {
-    constexpr QLatin1Char doubleQuote('"');
+static inline bool isDoubleQuoted(const QString &token) {
+    static const QLatin1Char doubleQuote('"');
     return token.startsWith(doubleQuote) && token.endsWith(doubleQuote) && token.size() > 1;
 }
 
@@ -659,61 +679,63 @@ QSchemeValue QSchemeEnvironment::eval(const QSchemeValue &exp)
 {
     using namespace QtSchemeFunctions;
 
-    switch (exp.type()) {
+    QSchemeValue current = exp;
+
+    switch (current.type()) {
     case QSchemeValue::Type::String:
     case QSchemeValue::Type::Number:
+    case QSchemeValue::Type::ForeignProcedure:
+    case QSchemeValue::Type::ForeignSyntax:
+        break;
+
     case QSchemeValue::Type::Environment:
-    {
-        QSchemeValue result = exp;
-        return result;
-    }
+    case QSchemeValue::Type::LambdaProcedure:
+        throw QSchemeException("eval - invalid parameter");
         break;
 
     case QSchemeValue::Type::Symbol:
-    {
-        QSchemeValue result = get(exp);
-        return result;
-    }
+        current = get(current);
         break;
 
     case QSchemeValue::Type::Cons:
     {
-        const QSchemeValue fn = eval(car(exp));
+        QSchemeValue fn = eval(car(exp));
+        QSchemeValue args = cdr(exp);
 
-        if (is_list(fn) && is_symbol(car(fn)) && car(fn).toSymbol() == QSchemeSymbolLiteral("procedure")) {
-            QSchemeValueList argnames = cadr(fn).toList();
-            QSchemeValueList argvalues = cdr(exp).toList();
+        if (fn.type() != QSchemeValue::Type::ForeignSyntax)
+            args = evalArgumentList(args);
 
-            if (argnames.size() != argvalues.size())
-                throw QSchemeException("Invalid argument count");
-
-            for (QSchemeValue &val : argvalues)
-                val = eval(val);
-
-            QSchemeEnvironment execution_env = cadddr(fn).toEnvironment().makeInner();
-
-            for (int i = 0; i < argnames.size(); i++)
-                execution_env.set(argnames[i], argvalues[i]);
-
-            QSchemeValue procedure_body = caddr(fn);
-            return execution_env.eval(procedure_body);
-        }
-
-        if (Q_UNLIKELY(fn.type() != QSchemeValue::Type::ForeignProcedure))
-            throw QSchemeException(QStringLiteral("eval: expected procedure, got %1").arg(exp.toPrintableString()));
-
-        QSchemeValue result = (*fn.toForeignProcedure())(this, exp);
-        return result;
-
+        current = apply(fn, args);
     }
         break;
-
-    case QSchemeValue::Type::ForeignProcedure:
-        return (*exp.toForeignProcedure())(this, QSchemeValueList());
-        break;
     }
+
+    return current;
 
     Q_UNREACHABLE();
+}
+
+QSchemeValue QSchemeEnvironment::apply(const QSchemeValue &procedure, const QSchemeValue &arguments)
+{
+    if (is_foreign_procedure(procedure)) {
+        return (procedure.toForeignProcedure())(arguments);
+    } else if (procedure.type() == QSchemeValue::Type::ForeignSyntax) {
+        return (procedure.toForeignSyntax())(*this, arguments);
+    } else if (is_native_procedure(procedure)) {
+        return procedure.toLambdaProcedure().apply(arguments);
+    } else {
+        throw QSchemeException("apply - unknown procedure type");
+    }
+}
+
+QSchemeValueList QSchemeEnvironment::evalArgumentList(const QSchemeValue &args)
+{
+    QSchemeValueList result;
+
+    for (const QSchemeValue &arg : args.toList())
+        result.push_back(eval(arg));
+
+    return result;
 }
 
 QSchemeEnvironment QSchemeEnvironment::makeInner()
@@ -724,8 +746,23 @@ QSchemeEnvironment QSchemeEnvironment::makeInner()
 }
 
 QSchemeEnvironment::QSchemeEnvironment(QSchemeEnvironmentPrivate *dd)
-    : d_ptr(dd)
+    : d_ptr(dd->sharedFromThis())
 {}
+
+QSchemeValue QSchemeLambdaProcedure::apply(const QSchemeValue &arguments)
+{
+    const QSchemeValueList arglist = arguments.toList();
+
+    if (Q_UNLIKELY(argnames.size() != arglist.size()))
+        throw QSchemeException("Invalid argument count");
+
+    QSchemeEnvironment execution_env = this->environment.makeInner();
+
+    for (int i = 0; i < argnames.size(); i++)
+        execution_env.set(argnames[i], arglist[i]);
+
+    return execution_env.eval(this->body);
+}
 
 #ifndef QT_NO_DEBUG_STREAM
 QDebug operator<<(QDebug d, const QSchemeValue &value)
